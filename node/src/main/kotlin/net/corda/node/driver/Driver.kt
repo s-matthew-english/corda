@@ -35,6 +35,7 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 
 /**
  * This file defines a small "Driver" DSL for starting up nodes that is only intended for development, demos and tests.
@@ -42,10 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * The process the driver is run in behaves as an Artemis client and starts up other processes. Namely it first
  * bootstraps a network map service to allow the specified nodes to connect to, then starts up the actual nodes.
  *
- * TODO The driver actually starts up as an Artemis server now that may route traffic. Fix this once the client MessagingService is done.
- * TODO The nodes are started up sequentially which is quite slow. Either speed up node startup or make startup parallel somehow.
  * TODO The driver now polls the network map cache for info about newly started up nodes, this could be done asynchronously(?).
- * TODO The network map service bootstrap is hacky (needs to fake the service's public key in order to retrieve the true one), needs some thought.
  */
 
 private val log: Logger = loggerFor<DriverDSL>()
@@ -385,8 +383,10 @@ open class DriverDSL(
                 )
         )
 
-        log.info("Starting network-map-service")
-        registerProcess(startNode(FullNodeConfiguration(config), quasarJarPath, debugPort))
+        thread {
+            log.info("Starting network-map-service")
+            registerProcess(startNode(FullNodeConfiguration(config), quasarJarPath, debugPort))
+        }
     }
 
     companion object {
