@@ -2,17 +2,17 @@ package net.corda.client.model
 
 import javafx.beans.property.SimpleObjectProperty
 import javafx.beans.value.ObservableValue
+import javafx.collections.FXCollections
 import javafx.collections.ObservableList
-import javafx.collections.ObservableMap
 import net.corda.client.fxutils.*
+import net.corda.client.model.PartiallyResolvedTransaction.InputResolution.Resolved
+import net.corda.client.model.PartiallyResolvedTransaction.InputResolution.Unresolved
 import net.corda.core.contracts.ContractState
 import net.corda.core.contracts.StateAndRef
 import net.corda.core.contracts.StateRef
-import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.StateMachineRunId
 import net.corda.core.transactions.SignedTransaction
 import net.corda.node.services.messaging.StateMachineUpdate
-import org.fxmisc.easybind.EasyBind
 
 data class GatheredTransactionData(
         val transaction: PartiallyResolvedTransaction,
@@ -32,24 +32,6 @@ data class PartiallyResolvedTransaction(
     sealed class InputResolution(val stateRef: StateRef) {
         class Unresolved(stateRef: StateRef) : InputResolution(stateRef)
         class Resolved(val stateAndRef: StateAndRef<ContractState>) : InputResolution(stateAndRef.ref)
-    }
-
-    companion object {
-        fun fromSignedTransaction(
-                transaction: SignedTransaction,
-                transactions: ObservableMap<SecureHash, SignedTransaction>
-        ) = PartiallyResolvedTransaction(
-                transaction = transaction,
-                inputs = transaction.tx.inputs.map { stateRef ->
-                    EasyBind.map(transactions.getObservableValue(stateRef.txhash)) {
-                        if (it == null) {
-                            InputResolution.Unresolved(stateRef)
-                        } else {
-                            InputResolution.Resolved(it.tx.outRef(stateRef.index))
-                        }
-                    }
-                }
-        )
     }
 }
 
@@ -80,16 +62,25 @@ data class StateMachineData(
 /**
  * This model provides an observable list of transactions and what state machines/flows recorded them
  */
-class GatheredTransactionDataModel {
+class TransactionDataModel {
     private val transactions by observable(NodeMonitorModel::transactions)
     private val stateMachineUpdates by observable(NodeMonitorModel::stateMachineUpdates)
     private val progressTracking by observable(NodeMonitorModel::progressTracking)
     private val stateMachineTransactionMapping by observable(NodeMonitorModel::stateMachineTransactionMapping)
+    // Convert rx.observables to FX observables.
+    private val transactionMap = transactions.recordAsAssociation(SignedTransaction::id)
+    val partiallyResolvedTransactions: ObservableList<PartiallyResolvedTransaction> = transactions.fold(FXCollections.observableArrayList()) { list, tx ->
+        val inputs = tx.tx.inputs.map { stateRef ->
+            transactionMap.getObservableValue(stateRef.txhash).map {
+                it?.let { Resolved(it.tx.outRef(stateRef.index)) } ?: Unresolved(stateRef)
+            }
+        }
+        list.add(PartiallyResolvedTransaction(tx, inputs))
+        list
+    }
 
-    private val collectedTransactions = transactions.recordInSequence()
-    private val transactionMap = collectedTransactions.associateBy(SignedTransaction::id)
     private val progressEvents = progressTracking.recordAsAssociation(ProgressTrackingEvent::stateMachineId)
-    private val stateMachineStatus = stateMachineUpdates.foldToObservableMap(Unit) { update, _unit, map: ObservableMap<StateMachineRunId, SimpleObjectProperty<StateMachineStatus>> ->
+    private val stateMachineStatus = stateMachineUpdates.fold(FXCollections.observableHashMap<StateMachineRunId, SimpleObjectProperty<StateMachineStatus>>()) { map, update ->
         when (update) {
             is StateMachineUpdate.Added -> {
                 val added: SimpleObjectProperty<StateMachineStatus> =
@@ -102,6 +93,7 @@ class GatheredTransactionDataModel {
                 added.set(StateMachineStatus.Removed(added.value.stateMachineName))
             }
         }
+        map
     }
     private val stateMachineDataList = LeftOuterJoinedMap(stateMachineStatus, progressEvents) { id, status, progress ->
         StateMachineData(id, progress.map { it?.let { FlowStatus(it.message) } }, status)
@@ -109,7 +101,4 @@ class GatheredTransactionDataModel {
     // TODO : Create a new screen for state machines.
     private val stateMachineDataMap = stateMachineDataList.associateBy(StateMachineData::id)
     private val smTxMappingList = stateMachineTransactionMapping.recordInSequence()
-    val partiallyResolvedTransactions = collectedTransactions.map {
-        PartiallyResolvedTransaction.fromSignedTransaction(it, transactionMap)
-    }
 }
